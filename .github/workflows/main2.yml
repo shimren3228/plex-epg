@@ -1,0 +1,38 @@
+name: Auto-Refresh Plex EPG
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-epg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Plex EPG script
+        env:
+          PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
+          PLEX_CLIENT_ID: ${{ secrets.PLEX_CLIENT_ID }}
+        run: python generate_epg3new.py
+
+      - name: Commit and push updated plex_epg.xml
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plex_epg.xml
+          git diff --staged --quiet || git commit -m "Update plex_epg.xml"
+          git push
