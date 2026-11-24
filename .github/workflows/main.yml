@@ -1,42 +1,38 @@
-mkdir .github\workflows
+name: Auto-Refresh Plex EPG
 
-(
-echo name: Auto-Refresh Plex EPG
-echo.
-echo on:
-echo   schedule:
-echo     - cron: '0 */6 * * *'
-echo   workflow_dispatch:
-echo.
-echo permissions:
-echo   contents: write
-echo.
-echo jobs:
-echo   build-epg:
-echo     runs-on: ubuntu-latest
-echo     steps:
-echo       - name: Checkout repository
-echo         uses: actions/checkout@v4
-echo.
-echo       - name: Set up Python
-echo         uses: actions/setup-python@v5
-echo         with:
-echo           python-version: '3.11'
-echo.
-echo       - name: Install dependencies
-echo         run: pip install requests
-echo.
-echo       - name: Run Plex EPG script
-echo         env:
-echo           PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
-echo           PLEX_CLIENT_ID: ${{ secrets.PLEX_CLIENT_ID }}
-echo         run: python generate_epg3new.py
-echo.
-echo       - name: Commit and push updated plex_epg.xml
-echo         run: ^|
-echo           git config user.name "github-actions[bot]"
-echo           git config user.email "github-actions[bot]@://github.com"
-echo           git add plex_epg.xml
-echo           git diff --staged --quiet ^|^| git commit -m "Update plex_epg.xml"
-echo           git push
-) > .github\workflows\refresh_epg.yml
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-epg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Plex EPG script
+        env:
+          PLEX_TOKEN: ${{ secrets.PLEX_TOKEN }}
+          PLEX_CLIENT_ID: ${{ secrets.PLEX_CLIENT_ID }}
+        run: python generate_epg3new.py
+
+      - name: Commit and push updated plex_epg.xml
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plex_epg.xml
+          git diff --staged --quiet || git commit -m "Update plex_epg.xml"
+          git push
