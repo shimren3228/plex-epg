@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -9,8 +10,9 @@ import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-PLEX_TOKEN = os.getenv("PLEX_TOKEN", "rXEXyKCsBa855MFDRZzV").strip()
-CLIENT_ID = os.getenv("PLEX_CLIENT_ID", "6439juv8dcadgfibnktjsa09").strip()
+# Uses `or` so an empty GitHub Secret safely falls back to your default values
+RAW_TOKEN = (os.getenv("PLEX_TOKEN") or "rXEXyKCsBa855MFDRZzV").strip()
+CLIENT_ID = (os.getenv("PLEX_CLIENT_ID") or "6439juv8dcadgfibnktjsa09").strip()
 
 PLEX_EPG_BASE = "https://epg.provider.plex.tv"
 PLEX_PLAY_BASE = "https://play.provider.plex.tv"
@@ -21,16 +23,44 @@ REQUEST_DELAY = 0.35
 MAX_RETRIES = 5
 
 
-def create_session():
-    session = requests.Session()
-    session.headers.update({
+def base_plex_headers(client_id):
+    return {
         "Accept": "application/xml",
-        "User-Agent": "Mozilla/5.0",
-        "X-Plex-Token": PLEX_TOKEN,
-        "X-Plex-Client-Identifier": CLIENT_ID,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "X-Plex-Product": "Plex Web",
         "X-Plex-Version": "4.163.0",
-    })
+        "X-Plex-Client-Identifier": client_id,
+        "X-Plex-Platform": "Chrome",
+        "X-Plex-Platform-Version": "131.0",
+        "X-Plex-Device": "Windows",
+        "X-Plex-Device-Name": "Chrome",
+        "X-Plex-Model": "hosted",
+        "X-Plex-Features": "external-media,indirect-media,hub-style-list",
+        "X-Plex-Provider-Version": "7.2",
+        "X-Plex-Text-Format": "plain",
+        "X-Plex-Language": "en",
+    }
+
+
+def fetch_anonymous_token():
+    """Fetches a fresh temporary Plex Web token if the configured token is expired or missing."""
+    new_client_id = str(uuid.uuid4())
+    headers = base_plex_headers(new_client_id)
+    headers["Accept"] = "application/json"
+    logging.info("Requesting fresh anonymous Plex Web token...")
+    resp = requests.post("https://plex.tv", headers=headers, timeout=30)
+    resp.raise_for_status()
+    token = resp.json().get("authToken")
+    if not token:
+        raise RuntimeError("Anonymous token response did not contain authToken.")
+    return token, new_client_id
+
+
+def create_session(token, client_id):
+    session = requests.Session()
+    headers = base_plex_headers(client_id)
+    headers["X-Plex-Token"] = token
+    session.headers.update(headers)
     return session
 
 
@@ -55,16 +85,15 @@ def get_with_retry(session, url, params=None):
 
 
 def discover_lineup_paths(session):
-    """Discovers current genre/filter channel lineup endpoints from Plex's provider XML."""
     fallback_paths = [
-        "/lineups/plex/channels?genre=featured",
+        "/lineups/plex/channels/featured",
         "/lineups/plex/channels?genre=bingeworthy",
         "/lineups/plex/channels?genre=movies",
-        "/lineups/plex/channels?genre=true-crime",
+        "/lineups/plex/channels?genre=crime",
         "/lineups/plex/channels?genre=news",
         "/lineups/plex/channels?genre=sports",
         "/lineups/plex/channels?genre=reality",
-        "/lineups/plex/channels?genre=classics",
+        "/lineups/plex/channels?genre=classic-tv",
         "/lineups/plex/channels?genre=adrenaline-sci-fi",
         "/lineups/plex/channels?genre=comedy",
         "/lineups/plex/channels?genre=daytime-tv-games",
@@ -97,10 +126,12 @@ def fetch_channels(session):
     logging.info("Fetching Plex Live TV channel lineup across categories...")
     paths = discover_lineup_paths(session)
     channels = {}
+    last_status = None
 
     for path in paths:
         url = f"{PLEX_EPG_BASE}{path}"
         resp = get_with_retry(session, url)
+        last_status = resp.status_code
         if resp.status_code != 200 or "<Channel" not in resp.text:
             continue
 
@@ -118,14 +149,7 @@ def fetch_channels(session):
                     "logo": thumb,
                 }
 
-    if not channels:
-        raise RuntimeError(
-            "No channels returned from epg.provider.plex.tv. "
-            "Check if your PLEX_TOKEN is still valid."
-        )
-
-    logging.info(f"Found {len(channels)} unique channels.")
-    return channels
+    return channels, last_status
 
 
 def fetch_channel_date_grid(session, channel_info, date_str):
@@ -188,8 +212,18 @@ def build_xmltv(channels, all_progs):
 
 def main():
     try:
-        session = create_session()
-        channels = fetch_channels(session)
+        session = create_session(RAW_TOKEN, CLIENT_ID)
+        channels, status = fetch_channels(session)
+
+        # If configured token failed (401/403/empty), automatically grab a fresh guest token and retry
+        if not channels:
+            logging.warning(f"Initial token returned 0 channels (HTTP {status}). Falling back to fresh anonymous token...")
+            fresh_token, fresh_cid = fetch_anonymous_token()
+            session = create_session(fresh_token, fresh_cid)
+            channels, status = fetch_channels(session)
+
+        if not channels:
+            raise RuntimeError(f"Still 0 channels after anonymous token fallback (HTTP {status}).")
 
         today = datetime.now(timezone.utc).date()
         dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(DAYS_TO_FETCH)]
